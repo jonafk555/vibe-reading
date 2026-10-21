@@ -41,12 +41,13 @@ body {
   border-bottom: 1px solid #2a3a5c;
   color: var(--text);
   padding: 8px 14px;
-  gap: 12px;
+  gap: 8px 12px;
   flex-shrink: 0;
+  flex-wrap: wrap;            /* narrow windows: wrap instead of clipping controls */
 }
 .t-left  { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.t-center { flex: 1; display: flex; align-items: center; gap: 8px; justify-content: center; min-width: 0; padding: 0 12px; }
-.t-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.t-center { flex: 1 1 160px; display: flex; align-items: center; gap: 8px; justify-content: center; min-width: 0; padding: 0 12px; }
+.t-right { display: flex; align-items: center; gap: 8px; flex-shrink: 1; flex-wrap: wrap; justify-content: flex-end; margin-left: auto; }
 
 .pdf-source {
   font-size: 12px; color: var(--muted); max-width: 100%;
@@ -162,7 +163,8 @@ body {
 #split { display: flex; flex: 1; min-height: 0; }
 
 .pdf-pane {
-  flex: 0 0 58%;
+  flex: 0 1 58%;
+  min-width: 220px;
   overflow: auto;
   background: #0f0f10;
   padding: 16px;
@@ -199,6 +201,18 @@ body.pdf-dark .page-wrap canvas { filter: invert(0.9) hue-rotate(180deg); }
   pointer-events: none;
   animation: hlpulse 1.2s ease-out 2;
 }
+/* user highlighter (螢光筆) — between canvas (z 0) and text layer (z 2) */
+.user-hl {
+  position: absolute; z-index: 1; pointer-events: none;
+  border-radius: 2px; mix-blend-mode: multiply;
+}
+.user-hl.hl-yellow { background: rgba(255, 226, 64, 0.55); }
+.user-hl.hl-green  { background: rgba(120, 230, 120, 0.50); }
+.user-hl.hl-pink   { background: rgba(255, 128, 180, 0.50); }
+.user-hl.hl-blue   { background: rgba(110, 180, 255, 0.50); }
+/* on the inverted dark page multiply would vanish — tint it instead */
+body.pdf-dark .user-hl { mix-blend-mode: normal; opacity: 0.55; }
+
 @keyframes hlpulse {
   0%   { box-shadow: 0 0 0 0 rgba(253,214,99,0.7); }
   100% { box-shadow: 0 0 0 10px rgba(253,214,99,0); }
@@ -209,7 +223,7 @@ body.pdf-dark .page-wrap canvas { filter: invert(0.9) hue-rotate(180deg); }
 
 /* ── Translation pane ──────────────────────────────────────── */
 .trans-pane {
-  flex: 1; min-width: 0; overflow-y: auto;
+  flex: 1; min-width: 260px; overflow-y: auto;
   background: var(--bg); padding: 14px;
 }
 .results { display: flex; flex-direction: column; gap: 10px; }
@@ -307,6 +321,28 @@ body.pdf-dark .page-wrap canvas { filter: invert(0.9) hue-rotate(180deg); }
   cursor: pointer; white-space: nowrap;
 }
 .float-btn:hover { background: #5a95f5; }
+.float-btn-hl { background: #a88a1c; }
+.float-btn-hl:hover { background: #c4a226; }
+
+/* popup on an existing highlight: recolour / remove */
+.hl-menu {
+  position: fixed; z-index: 100;
+  display: flex; align-items: center; gap: 6px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 18px; padding: 4px 6px;
+  box-shadow: 0 3px 12px rgba(0,0,0,0.5);
+}
+.hl-swatch {
+  width: 20px; height: 20px; border-radius: 50%; cursor: pointer;
+  border: 2px solid transparent;
+}
+.hl-swatch[data-color="yellow"] { background: #ffe240; }
+.hl-swatch[data-color="green"]  { background: #78e678; }
+.hl-swatch[data-color="pink"]   { background: #ff80b4; }
+.hl-swatch[data-color="blue"]   { background: #6eb4ff; }
+.hl-swatch:hover, .hl-swatch.active { border-color: var(--text); }
+.hl-del { background: #5c2b2b; color: #f28b82; }
+.hl-del:hover { background: #7a3636; }
 
 /* ── Ask-Nano modal ────────────────────────────────────────── */
 /* Floating, non-blocking panel — no full-screen backdrop, so the rest of the
@@ -429,6 +465,14 @@ body.pdf-dark .page-wrap canvas { filter: invert(0.9) hue-rotate(180deg); }
 .open-pdf-btn { font-size: 14px; padding: 10px 18px; }
 .open-pdf p { margin-top: 10px; font-size: 12px; }
 
+/* ── Medium windows: drop secondary topbar bits before controls wrap ── */
+@media (max-width: 1280px) {
+  .repo-link, .app-ver { display: none; }
+}
+@media (max-width: 1080px) {
+  .src-info, .label, .title { display: none; }
+}
+
 /* ── Narrow screens (phones): stack the PDF above the translation ── */
 @media (max-width: 760px) {
   body { height: 100dvh; }
@@ -440,8 +484,8 @@ body.pdf-dark .page-wrap canvas { filter: invert(0.9) hue-rotate(180deg); }
   .status-row { padding: 4px 10px; gap: 10px; }
   .status-text { white-space: normal; }
   #split { flex-direction: column; }
-  .pdf-pane { flex: 0 0 45% !important; padding: 8px; }
+  .pdf-pane { flex: 0 0 45% !important; padding: 8px; min-width: 0; }
   .divider { display: none; }
-  .trans-pane { flex: 1; padding: 10px; border-top: 2px solid var(--border); }
+  .trans-pane { flex: 1; min-width: 0; padding: 10px; border-top: 2px solid var(--border); }
   .zoom-ctrl { left: auto; right: 10px; bottom: auto; top: calc(45vh + 40px); padding: 2px 6px; }
 }

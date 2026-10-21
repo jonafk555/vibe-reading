@@ -55,6 +55,9 @@ const els = {
   askFloat:      document.getElementById('askFloat'),
   askFloatAsk:   document.getElementById('askFloatAsk'),
   askFloatTrans: document.getElementById('askFloatTrans'),
+  askFloatHl:    document.getElementById('askFloatHl'),
+  hlMenu:        document.getElementById('hlMenu'),
+  hlDelete:      document.getElementById('hlDelete'),
   askModal:      document.getElementById('askModal'),
   askSel:        document.getElementById('askSel'),
   askInput:      document.getElementById('askInput'),
@@ -247,6 +250,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupReverseLocate();
   setupZoom();
   setupKeyboardScroll();
+  setupHighlighter();
+  setupAutoFit();
 
   els.translateBtn.addEventListener('click', () => startTranslation(true));
   els.stopBtn.addEventListener('click', () => {
@@ -277,6 +282,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   showPdfSource();
+  hlDocKey = 'url:' + pdfUrl.split('#')[0];
   await openPdf(async () => {
     const resp = await fetch(pdfUrl);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}（若為本機檔案，請到 ${BROWSER.scheme}://extensions 開啟「允許存取檔案網址」）`);
@@ -287,6 +293,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 async function openPdf(loadBuffer) {
   try {
     await loadAndRenderPdf(loadBuffer);
+    await loadHighlights();
     detectedSource = await detectSourceLang(paragraphs.slice(0, 5).map(p => p.text).join(' ').slice(0, 1000));
     els.srcLangInfo.textContent = `偵測來源：${detectedSource}`;
     els.translateBtn.disabled = false;
@@ -334,6 +341,7 @@ function showOpenFilePrompt() {
 function openPdfFile(file) {
   if (pdfDoc) return;
   pdfUrl = null;
+  hlDocKey = `file:${file.name}:${file.size}`;
   clearError();
   els.pdfSource.textContent = `📁 本機檔案：${file.name}`;
   els.pdfSource.title = file.name;
@@ -668,6 +676,13 @@ function showPdfSource() {
 // ─── Load & render PDF (canvas + selectable text layer) ─────────────────────────
 let baseScale = 1;   // fit-to-width scale
 let zoom      = 1;   // user zoom multiplier
+let fitPageW  = 0;   // first page's scale-1 width, the fit-to-width reference
+let pagesReady = false;   // set once every page is rendered and analysed
+
+function fitScale() {
+  const paneW = els.pdfPane.clientWidth - 48;
+  return Math.max(0.5, Math.min(2.5, paneW / fitPageW));
+}
 
 async function loadAndRenderPdf(loadBuffer) {
   setStatus(pdfUrl ? '下載 PDF 檔案...' : '讀取 PDF 檔案...');
@@ -688,9 +703,8 @@ async function loadAndRenderPdf(loadBuffer) {
 
   // fit-to-width base scale
   const firstPage = await pdfDoc.getPage(1);
-  const base = firstPage.getViewport({ scale: 1 });
-  const paneW = els.pdfPane.clientWidth - 48;
-  baseScale = Math.max(0.5, Math.min(2.5, paneW / base.width));
+  fitPageW = firstPage.getViewport({ scale: 1 }).width;
+  baseScale = fitScale();
   zoom = 1;
   renderScale = baseScale * zoom;
 
@@ -698,6 +712,8 @@ async function loadAndRenderPdf(loadBuffer) {
   await renderPages(true);
   paragraphs = refineParagraphs(paragraphs);
   updateZoomLabel();
+  pagesReady = true;
+  refitPdf();   // the pane may have been resized while pages were rendering
 }
 
 // Render (or re-render) every page at the current renderScale.
@@ -798,6 +814,13 @@ function updateZoomLabel() {
 // is placed back under the focal Y. Fixes both figure drift and wrong-page jumps.
 function setZoom(z, focalClientY) {
   if (!pdfDoc) return;
+  zoom = Math.max(0.4, Math.min(4, z));
+  applyRenderScale(baseScale * zoom, focalClientY);
+}
+
+// Resize every page to `scale` while keeping the page point under the focal Y
+// (default: pane centre) in place, then re-rasterise once things settle.
+function applyRenderScale(scale, focalClientY) {
   const fcY = (focalClientY != null)
     ? focalClientY
     : els.pdfPane.getBoundingClientRect().top + els.pdfPane.clientHeight / 2;
@@ -817,8 +840,7 @@ function setZoom(z, focalClientY) {
     }
   }
 
-  zoom = Math.max(0.4, Math.min(4, z));
-  renderScale = baseScale * zoom;
+  renderScale = scale;
   updateZoomLabel();
 
   // 1) Instant, smooth: stretch existing canvases via CSS and rescale the text
@@ -1686,13 +1708,14 @@ function highlightParagraph(para) {
     if (!pg) continue;
     const [ax, ay] = pg.viewport.convertToViewportPoint(rect.x0, rect.y0);
     const [bx, by] = pg.viewport.convertToViewportPoint(rect.x1, rect.y1);
-    const pad = 4;
+    // Percentages of the page box, so the box follows later zooms / resizes.
+    const pad = 4, vw = pg.viewport.width, vh = pg.viewport.height;
     const hl = document.createElement('div');
     hl.className = 'hl';
-    hl.style.left   = (Math.min(ax, bx) - pad) + 'px';
-    hl.style.top    = (Math.min(ay, by) - pad) + 'px';
-    hl.style.width  = (Math.abs(bx - ax) + pad * 2) + 'px';
-    hl.style.height = (Math.abs(by - ay) + pad * 2) + 'px';
+    hl.style.left   = (Math.min(ax, bx) - pad) / vw * 100 + '%';
+    hl.style.top    = (Math.min(ay, by) - pad) / vh * 100 + '%';
+    hl.style.width  = (Math.abs(bx - ax) + pad * 2) / vw * 100 + '%';
+    hl.style.height = (Math.abs(by - ay) + pad * 2) / vh * 100 + '%';
     pg.wrap.appendChild(hl);
     first = first || hl;
   }
@@ -1722,6 +1745,8 @@ function setupReverseLocate() {
     if (!pg) return;
 
     const box = wrap.getBoundingClientRect();
+    showHighlightMenuAt(pageNum, (e.clientX - box.left) / box.width,
+                        (e.clientY - box.top) / box.height, e.clientX, e.clientY);
     const [px, py] = pg.viewport.convertToPdfPoint(e.clientX - box.left, e.clientY - box.top);
 
     const idx = findParagraphAt(pageNum, px, py);
@@ -1774,9 +1799,11 @@ function setupSelectionAsk() {
       const text = sel ? sel.toString().trim() : '';
       if (text.length >= 2 && sel.rangeCount) {
         selectedText = text;
-        const r = sel.getRangeAt(0).getBoundingClientRect();
+        selectedRange = sel.getRangeAt(0).cloneRange();
+        const r = selectedRange.getBoundingClientRect();
         els.askFloat.style.display = '';
-        els.askFloat.style.left = Math.min(window.innerWidth - 175, Math.max(4, r.left + r.width / 2 - 85)) + 'px';
+        const fw = els.askFloat.offsetWidth;
+        els.askFloat.style.left = Math.min(window.innerWidth - fw - 4, Math.max(4, r.left + r.width / 2 - fw / 2)) + 'px';
         els.askFloat.style.top  = Math.max(8, r.top - 42) + 'px';
       } else {
         els.askFloat.style.display = 'none';
@@ -1963,6 +1990,182 @@ async function askNano() {
   }
 }
 
+// ─── Highlighter (螢光筆) ─────────────────────────────────────────────────────────
+// A highlight is a set of boxes stored as fractions of the page box, so they
+// stay put through zoom, window resize and dark mode, and are saved per PDF in
+// chrome.storage.local. They sit between the canvas and the text layer, so text
+// stays selectable on top of them.
+const HL_COLORS = ['yellow', 'green', 'pink', 'blue'];
+let highlights    = [];      // { id, color, text, rects:[{ page, x, y, w, h }] }
+let hlDocKey      = null;    // storage identity of the open PDF
+let hlColor       = 'yellow';
+let selectedRange = null;    // last selection in the PDF pane (for 🖍)
+let hlMenuTarget  = null;    // id of the highlight the popup edits
+
+function hlStorageKey() { return hlDocKey ? 'hl:' + hlDocKey : null; }
+
+async function loadHighlights() {
+  const key = hlStorageKey();
+  highlights = [];
+  if (key) {
+    const got = await storageGet(key);
+    if (Array.isArray(got[key])) highlights = got[key];
+  }
+  renderHighlights();
+}
+
+function saveHighlights() {
+  const key = hlStorageKey();
+  if (!key) return;
+  if (highlights.length) chrome.storage.local.set({ [key]: highlights });
+  else chrome.storage.local.remove(key);
+}
+
+function renderHighlights() {
+  els.pdfInner.querySelectorAll('.user-hl').forEach(e => e.remove());
+  for (const h of highlights) {
+    for (const r of h.rects) {
+      const pg = pageWraps[r.page];
+      if (!pg) continue;
+      const d = document.createElement('div');
+      d.className = `user-hl hl-${HL_COLORS.includes(h.color) ? h.color : 'yellow'}`;
+      d.dataset.id = h.id;
+      d.style.left   = r.x * 100 + '%';
+      d.style.top    = r.y * 100 + '%';
+      d.style.width  = r.w * 100 + '%';
+      d.style.height = r.h * 100 + '%';
+      pg.wrap.insertBefore(d, pg.textLayer);
+    }
+  }
+}
+
+// Turn a DOM range over the text layers into per-line page-fraction boxes.
+function rangeToHighlightRects(range) {
+  const wraps = Object.keys(pageWraps).map(k => ({ page: Number(k), box: pageWraps[k].wrap.getBoundingClientRect() }));
+  const byPage = new Map();
+  for (const r of range.getClientRects()) {
+    if (r.width < 1 || r.height < 1) continue;
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const w = wraps.find(({ box: b }) => cx >= b.left && cx <= b.right && cy >= b.top && cy <= b.bottom);
+    if (!w) continue;
+    if (!byPage.has(w.page)) byPage.set(w.page, { box: w.box, rs: [] });
+    byPage.get(w.page).rs.push({ l: r.left, t: r.top, r: r.right, b: r.bottom });
+  }
+
+  const out = [];
+  for (const [page, { box, rs }] of byPage) {
+    // Drop whole-element boxes (e.g. a fully selected text layer) that dwarf the glyph runs.
+    const mh = median(rs.map(r => r.b - r.t));
+    const runs = rs.filter(r => r.b - r.t <= mh * 2.5).sort((a, b) => a.t - b.t || a.l - b.l);
+    // Merge runs on the same line (vertical overlap) that touch or nearly touch.
+    const lines = [];
+    for (const r of runs) {
+      const h = r.b - r.t;
+      const ln = lines.find(m => Math.min(m.b, r.b) - Math.max(m.t, r.t) > 0.5 * Math.min(h, m.b - m.t)
+                                && r.l <= m.r + h && r.r >= m.l - h);
+      if (ln) { ln.l = Math.min(ln.l, r.l); ln.r = Math.max(ln.r, r.r); ln.t = Math.min(ln.t, r.t); ln.b = Math.max(ln.b, r.b); }
+      else lines.push({ ...r });
+    }
+    for (const m of lines) {
+      out.push({ page,
+        x: (m.l - box.left) / box.width,  y: (m.t - box.top) / box.height,
+        w: (m.r - m.l) / box.width,       h: (m.b - m.t) / box.height });
+    }
+  }
+  return out;
+}
+
+function addHighlightFromSelection() {
+  if (!selectedRange) return;
+  const rects = rangeToHighlightRects(selectedRange);
+  if (!rects.length) return;
+  highlights.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+                    color: hlColor, text: selectedText.slice(0, 500), rects });
+  saveHighlights();
+  renderHighlights();
+  window.getSelection()?.removeAllRanges();
+  selectedRange = null;
+}
+
+// Called on a plain click in the PDF (fx, fy = page fractions): if it hit a
+// highlight, open the recolour / remove popup next to the cursor.
+function showHighlightMenuAt(page, fx, fy, clientX, clientY) {
+  const hit = [...highlights].reverse().find(h => h.rects.some(r =>
+    r.page === page && fx >= r.x && fx <= r.x + r.w && fy >= r.y && fy <= r.y + r.h));
+  if (!hit) { hideHighlightMenu(); return; }
+  hlMenuTarget = hit.id;
+  els.hlMenu.querySelectorAll('.hl-swatch').forEach(b =>
+    b.classList.toggle('active', b.dataset.color === hit.color));
+  els.hlMenu.style.display = '';
+  const mw = els.hlMenu.offsetWidth;
+  els.hlMenu.style.left = Math.min(window.innerWidth - mw - 4, Math.max(4, clientX - mw / 2)) + 'px';
+  els.hlMenu.style.top  = Math.max(8, clientY - 48) + 'px';
+}
+
+function hideHighlightMenu() {
+  els.hlMenu.style.display = 'none';
+  hlMenuTarget = null;
+}
+
+function setupHighlighter() {
+  chrome.storage.local.get('hlColor', ({ hlColor: c }) => { if (HL_COLORS.includes(c)) hlColor = c; });
+
+  // Keep the PDF selection alive while pressing the floating buttons.
+  els.askFloat.addEventListener('mousedown', e => e.preventDefault());
+  els.hlMenu.addEventListener('mousedown', e => e.preventDefault());
+
+  els.askFloatHl.addEventListener('click', () => {
+    els.askFloat.style.display = 'none';
+    addHighlightFromSelection();
+  });
+
+  els.hlMenu.querySelectorAll('.hl-swatch').forEach(btn => btn.addEventListener('click', () => {
+    const h = highlights.find(x => x.id === hlMenuTarget);
+    hlColor = btn.dataset.color;
+    chrome.storage.local.set({ hlColor });
+    if (h) { h.color = hlColor; saveHighlights(); renderHighlights(); }
+    hideHighlightMenu();
+  }));
+  els.hlDelete.addEventListener('click', () => {
+    highlights = highlights.filter(x => x.id !== hlMenuTarget);
+    saveHighlights();
+    renderHighlights();
+    hideHighlightMenu();
+  });
+
+  els.pdfPane.addEventListener('scroll', hideHighlightMenu);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideHighlightMenu(); });
+  document.addEventListener('mousedown', (e) => {
+    if (!els.hlMenu.contains(e.target)) hideHighlightMenu();
+  });
+}
+
+// ─── Auto-fit on window / pane resize ───────────────────────────────────────────
+// The PDF keeps fitting the pane width (times the user's zoom) whenever the
+// window or the divider changes the pane size; floating panels are kept on-screen.
+// Not while the first render is running: the layout model is still reading
+// those canvases, so re-rasterising them would skew paragraph positions.
+function refitPdf() {
+  if (!pagesReady) return;
+  const next = fitScale();
+  if (Math.abs(next - baseScale) / baseScale < 0.005) return;
+  baseScale = next;
+  applyRenderScale(baseScale * zoom);
+}
+
+function setupAutoFit() {
+  new ResizeObserver(refitPdf).observe(els.pdfPane);
+
+  window.addEventListener('resize', () => {
+    els.askFloat.style.display = 'none';
+    hideHighlightMenu();
+    if (els.askModal.style.display === 'none' || els.askModal.style.left === '') return;
+    const box = els.askModal.getBoundingClientRect();
+    els.askModal.style.left = Math.max(0, Math.min(window.innerWidth  - box.width,  box.left)) + 'px';
+    els.askModal.style.top  = Math.max(0, Math.min(window.innerHeight - box.height, box.top))  + 'px';
+  });
+}
+
 // ─── Resizable divider ──────────────────────────────────────────────────────────
 function setupDivider() {
   let dragging = false;
@@ -1974,7 +2177,7 @@ function setupDivider() {
   document.addEventListener('mousemove', (e) => {
     if (!dragging) return;
     const pct = Math.min(80, Math.max(30, (e.clientX / window.innerWidth) * 100));
-    els.pdfPane.style.flex = `0 0 ${pct}%`;
+    els.pdfPane.style.flex = `0 1 ${pct}%`;
   });
   document.addEventListener('mouseup', () => {
     dragging = false;
