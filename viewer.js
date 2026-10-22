@@ -29,6 +29,7 @@ const els = {
   pdfSource:     document.getElementById('pdfSource'),
   openFileBtn:   document.getElementById('openFileBtn'),
   fileInput:     document.getElementById('fileInput'),
+  savePdfBtn:    document.getElementById('savePdfBtn'),
   srcLangInfo:   document.getElementById('srcLangInfo'),
   zoomIn:        document.getElementById('zoomIn'),
   zoomOut:       document.getElementById('zoomOut'),
@@ -97,6 +98,8 @@ const els = {
 // ─── State ────────────────────────────────────────────────────────────────────
 let pdfUrl        = null;
 let pdfDoc        = null;
+let pdfBytes      = null;   // untouched copy of the loaded file, for 💾 export
+let pdfFileName   = null;   // suggested name for the exported copy
 let abortCtrl     = null;
 let translatorObj = null;
 let paragraphs    = [];     // { page, text, rect:{x0,y0,x1,y1}, parts:[{page, rect}] } — page/rect = first part
@@ -251,6 +254,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupZoom();
   setupKeyboardScroll();
   setupHighlighter();
+  setupSavePdf();
   setupAutoFit();
 
   els.translateBtn.addEventListener('click', () => startTranslation(true));
@@ -283,6 +287,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   showPdfSource();
   hlDocKey = 'url:' + pdfUrl.split('#')[0];
+  pdfFileName = fileNameFromUrl(pdfUrl);
   await openPdf(async () => {
     const resp = await fetch(pdfUrl);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}（若為本機檔案，請到 ${BROWSER.scheme}://extensions 開啟「允許存取檔案網址」）`);
@@ -297,6 +302,7 @@ async function openPdf(loadBuffer) {
     detectedSource = await detectSourceLang(paragraphs.slice(0, 5).map(p => p.text).join(' ').slice(0, 1000));
     els.srcLangInfo.textContent = `偵測來源：${detectedSource}`;
     els.translateBtn.disabled = false;
+    els.savePdfBtn.disabled = false;
     setStatus('PDF 已載入');
     // Requirement 4 — auto start translation
     if (!els.translateBtn.disabled) startTranslation(false);
@@ -342,6 +348,7 @@ function openPdfFile(file) {
   if (pdfDoc) return;
   pdfUrl = null;
   hlDocKey = `file:${file.name}:${file.size}`;
+  pdfFileName = file.name;
   clearError();
   els.pdfSource.textContent = `📁 本機檔案：${file.name}`;
   els.pdfSource.title = file.name;
@@ -691,6 +698,7 @@ async function loadAndRenderPdf(loadBuffer) {
 
   const buf = await loadBuffer();
   setIndeterminate(false);
+  pdfBytes = new Uint8Array(buf.slice(0));   // pdf.js may detach `buf` when handing it to the worker
 
   pdfDoc = await PDFJS.getDocument({ data: buf }).promise;
 
@@ -2137,6 +2145,131 @@ function setupHighlighter() {
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideHighlightMenu(); });
   document.addEventListener('mousedown', (e) => {
     if (!els.hlMenu.contains(e.target)) hideHighlightMenu();
+  });
+}
+
+// ─── Save PDF with highlights (💾) ────────────────────────────────────────────────
+// Writes every highlight into a copy of the original file as a standard PDF
+// /Highlight annotation (with its own appearance stream, so Acrobat, Chrome,
+// Preview etc. all show it and can still edit / delete it), then downloads it.
+// pdf-lib is only loaded the first time this is used.
+const HL_RGB = {
+  yellow: [1, 0.886, 0.251], green: [0.471, 0.902, 0.471],
+  pink:   [1, 0.502, 0.706], blue:  [0.431, 0.706, 1],
+};
+
+function fileNameFromUrl(url) {
+  try {
+    const name = decodeURIComponent(new URL(url).pathname.split('/').pop() || '');
+    if (name) return name;
+  } catch (_) {}
+  return 'document.pdf';
+}
+
+let pdfLibLoading = null;
+function loadPdfLib() {
+  if (window.PDFLib) return Promise.resolve(window.PDFLib);
+  pdfLibLoading ??= new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'lib/pdf-lib/pdf-lib.min.js';
+    s.onload  = () => resolve(window.PDFLib);
+    s.onerror = () => { pdfLibLoading = null; reject(new Error('無法載入 pdf-lib')); };
+    document.head.appendChild(s);
+  });
+  return pdfLibLoading;
+}
+
+// Page-fraction boxes → PDF user-space quads, via pdf.js so crop-box offsets
+// and page rotation are handled the same way the viewer draws them.
+async function highlightQuadsByPage() {
+  const out = new Map();   // page -> [{ color, text, quads:[[x0,y0,x1,y1]] }]
+  for (const h of highlights) {
+    const perPage = new Map();
+    for (const r of h.rects) {
+      if (r.page < 1 || r.page > pdfDoc.numPages) continue;
+      const vp = (await pdfDoc.getPage(r.page)).getViewport({ scale: 1 });
+      const [ax, ay] = vp.convertToPdfPoint(r.x * vp.width, r.y * vp.height);
+      const [bx, by] = vp.convertToPdfPoint((r.x + r.w) * vp.width, (r.y + r.h) * vp.height);
+      if (!perPage.has(r.page)) perPage.set(r.page, []);
+      perPage.get(r.page).push([Math.min(ax, bx), Math.min(ay, by), Math.max(ax, bx), Math.max(ay, by)]);
+    }
+    for (const [page, quads] of perPage) {
+      if (!out.has(page)) out.set(page, []);
+      out.get(page).push({ color: HL_RGB[h.color] || HL_RGB.yellow, text: h.text || '', quads });
+    }
+  }
+  return out;
+}
+
+async function buildHighlightedPdf() {
+  const { PDFDocument, PDFName, PDFString, PDFHexString } = await loadPdfLib();
+  const doc = await PDFDocument.load(pdfBytes, { updateMetadata: false });
+  const ctx = doc.context, pages = doc.getPages();
+  const f = n => +n.toFixed(3);
+  const now = PDFString.fromDate(new Date());
+
+  for (const [page, list] of await highlightQuadsByPage()) {
+    const node = pages[page - 1]?.node;
+    if (!node) continue;
+    for (const { color, text, quads } of list) {
+      const rect = [
+        f(Math.min(...quads.map(q => q[0]))), f(Math.min(...quads.map(q => q[1]))),
+        f(Math.max(...quads.map(q => q[2]))), f(Math.max(...quads.map(q => q[3]))),
+      ];
+      // QuadPoints order per line: top-left, top-right, bottom-left, bottom-right.
+      const quadPoints = quads.flatMap(([x0, y0, x1, y1]) => [x0, y1, x1, y1, x0, y0, x1, y0].map(f));
+      const ap = ctx.register(ctx.stream(
+        `/GS0 gs ${color.map(f).join(' ')} rg ` +
+        quads.map(([x0, y0, x1, y1]) => `${f(x0)} ${f(y0)} ${f(x1 - x0)} ${f(y1 - y0)} re`).join(' ') + ' f',
+        {
+          Type: 'XObject', Subtype: 'Form', BBox: rect,
+          Resources: { ExtGState: { GS0: { Type: 'ExtGState', BM: 'Multiply', CA: 1, ca: 1 } } },
+        }));
+      const annot = ctx.obj({
+        Type: 'Annot', Subtype: 'Highlight', F: 4,
+        Rect: rect, QuadPoints: quadPoints, C: color,
+        T: PDFHexString.fromText('Vibe Reading'), M: now,
+        Contents: PDFHexString.fromText(text),
+        AP: { N: ap },
+      });
+      node.addAnnot(ctx.register(annot));
+    }
+  }
+  return doc.save();
+}
+
+function downloadBytes(bytes, name) {
+  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+function setupSavePdf() {
+  els.savePdfBtn.addEventListener('click', async () => {
+    if (!pdfDoc || !pdfBytes || els.savePdfBtn.disabled) return;
+    const base = (pdfFileName || 'document.pdf').replace(/\.pdf$/i, '');
+    if (!highlights.length) {
+      setStatus('尚無螢光筆標記，已儲存原始 PDF');
+      downloadBytes(pdfBytes, base + '.pdf');
+      return;
+    }
+    els.savePdfBtn.disabled = true;
+    setStatus('正在產生含螢光筆的 PDF...');
+    try {
+      downloadBytes(await buildHighlightedPdf(), base + '-highlighted.pdf');
+      setStatus(`已儲存 PDF（${highlights.length} 處螢光筆）`);
+    } catch (e) {
+      console.error('[氛圍閱讀] 儲存 PDF 失敗：', e);
+      const encrypted = /encrypt/i.test(e?.message || '');
+      setStatus(encrypted ? '此 PDF 已加密，無法寫入螢光筆' : `儲存 PDF 失敗：${e?.message || e}`);
+    } finally {
+      els.savePdfBtn.disabled = false;
+    }
   });
 }
 

@@ -216,6 +216,8 @@ PDF 版面分析使用 PaddlePaddle 的 [PP-DocLayout-S](https://huggingface.co/
 
 本機翻譯模型為赫爾辛基大學的 [Opus-MT](https://github.com/Helsinki-NLP/Opus-MT)（CC-BY 4.0；使用 [Xenova](https://huggingface.co/Xenova) 轉出的 ONNX 版本，執行時才下載、不隨套件散布），分詞使用 Hugging Face 的 [tokenizers.js](https://github.com/huggingface/tokenizers.js)（Apache-2.0），簡轉繁使用 [opencc-js](https://github.com/nk2028/opencc-js)（MIT；字典資料 Apache-2.0），授權條款見 `lib/tokenizers/`、`lib/opencc/`。
 
+儲存含螢光筆的 PDF 使用 [pdf-lib](https://github.com/Hopding/pdf-lib)（MIT），授權條款見 `lib/pdf-lib/`。
+
 歡迎 issue 與 PR — [Issues](https://github.com/aaaddress1/vibe-reading/issues) 是個好的起點。
 
 ## 📄 授權
@@ -349,6 +351,8 @@ And a tribute to "Immersive Translate" for the inspiration.
 PDF layout analysis uses PaddlePaddle's [PP-DocLayout-S](https://huggingface.co/PaddlePaddle/PP-DocLayout-S) (Apache-2.0) and Microsoft's [onnxruntime-web](https://github.com/microsoft/onnxruntime) (MIT); see `lib/layout/` and `lib/ort/` for their licenses.
 
 The local translation models are [Opus-MT](https://github.com/Helsinki-NLP/Opus-MT) by the University of Helsinki (CC-BY 4.0; ONNX exports by [Xenova](https://huggingface.co/Xenova), downloaded at runtime and not bundled). Tokenization uses Hugging Face's [tokenizers.js](https://github.com/huggingface/tokenizers.js) (Apache-2.0) and Simplified→Traditional conversion uses [opencc-js](https://github.com/nk2028/opencc-js) (MIT; dictionary data Apache-2.0); see `lib/tokenizers/` and `lib/opencc/`.
+
+Saving the PDF with highlights uses [pdf-lib](https://github.com/Hopding/pdf-lib) (MIT); see `lib/pdf-lib/`.
 
 ## License
 
